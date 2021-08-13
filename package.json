@@ -1,5 +1,5 @@
 {
-  "name": "data-ingestion",
+  "name": "@jxeeno/data-ingestion",
   "version": "1.0.0",
   "description": "Library for ingesting data with versioning",
   "main": "index.js",
