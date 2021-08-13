@@ -1,0 +1,13 @@
+{
+  "name": "data-ingestion",
+  "version": "1.0.0",
+  "description": "Library for ingesting data with versioning",
+  "main": "index.js",
+  "repository": "git@github.com:jxeeno/data-ingestion.git",
+  "author": "Kenneth Tsang <me@jxeeno.com>",
+  "license": "MIT",
+  "dependencies": {
+    "lodash": "^4.17.21",
+    "mongodb": "^4.1.0"
+  }
+}
