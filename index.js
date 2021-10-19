@@ -10,6 +10,7 @@ class DataIngestion {
         this.config = config
         this.client = new MongoClient(_.get(this.config, 'mongo.uri'), { useNewUrlParser: true, useUnifiedTopology: true });
         this.viewName = `vw_${_.get(this.config, 'mongo.collection')}`;
+        this.iviewName = `ivw_${_.get(this.config, 'mongo.collection')}`;
         this.collectionName = _.get(this.config, 'mongo.collection');
     }
 
@@ -21,12 +22,15 @@ class DataIngestion {
 
         await this._ensureViewsAndIndexes();
         this.viewCollection = this.db.collection(this.viewName);
+        this.iviewCollection = this.db.collection(this.iviewName);
         await this._loadExistingHashes();
     }
 
     async _ensureViewsAndIndexes() {
         await this.collection.createIndex({ startDate: 1, endDate: 1 })
         await this.collection.createIndex({ startDate: 1, endDate: 1, key: 1 })
+        await this.collection.createIndex({ endDate: 1, 'data.id': 1 })
+        await this.collection.createIndex({ endDate: 1, key: 1 })
 
         const collections = await this.db.listCollections().toArray();
         if(!collections.find(c => c.name === this.viewName)){
@@ -43,12 +47,41 @@ class DataIngestion {
                 ]},
             )
         }
+        
+        if(!collections.find(c => c.name === this.iviewName)){
+            await this.db.createCollection(
+                this.iviewName,
+                {viewOn: this.collectionName, pipeline: [
+                    {
+                        $match: 
+                            endDate: null
+                        }
+                    }
+                ]},
+            )
+        }
     }
-
+    
+    static dotNotationDataPrefix (obj) {
+        const newObject = {};
+        for(const key in obj){
+            if(key === '__key'){
+                newObject.key = obj[key];
+            }else if(key === '__hash'){
+                newObject.hash = obj[key];
+            }else if(key === '_id'){
+                newObject._id = obj[key];
+            }else{
+                newObject[`data.${key}`] = obj[key];
+            }
+        }
+        return newObject;
+    }
+    
     async _loadExistingHashes() {
-        const hashes = await this.viewCollection.find({
-            ..._.get(this.config, 'query', {})
-        }, {projection: {'__hash': 1, '__key': 1}}).toArray();
+        const hashes = await this.iviewCollection.find({
+            ...DataIngestion.dotNotationDataPrefix(_.get(this.config, 'query', {}))
+        }, {projection: {'hash': 1, 'key': 1}}).toArray();
 
         if(!hashes){
             // no hashes
@@ -57,32 +90,48 @@ class DataIngestion {
             console.log(`Found ${hashes.length} existing active entries`);
 
             for(const entry of hashes){
-                this.existingHashes.set(entry.__hash, entry);
-                this.existingHashesMutatable.set(entry.__hash, entry._id);
+                this.existingHashes.set(entry.hash, entry);
+
+                if(this.existingHashesMutatable.has(entry.hash)){
+                    this.existingHashesMutatable.get(entry.hash).push(entry._id);
+                }else{
+                    this.existingHashesMutatable.set(entry.hash, [entry._id]);
+                }
+                
             }
         }
     }
-
-    async upsertEntries(entries){
+    
+    async upsertEntries(entries, dryRun = false){
         await this._init();
-        const ops = entries.map(entry => {
+        const stats = {insert: 0, delete: 0, update: 0}
+        const ops = entries.flatMap(entry => {
             const hash = this.hashEntry(entry);
             const key = this.keyEntry(entry);
             if(this.existingHashesMutatable.has(hash)){
                 // data is unmodified
-                const _id = this.existingHashesMutatable.get(hash);
+                const _ids = this.existingHashesMutatable.get(hash);
                 this.existingHashesMutatable.delete(hash);
-                if(this.config.pick || this.config.omit){
-                    return {
+                if(_.get(this.config, 'hashing.pick') || _.get(this.config, 'hashing.omit')){
+                    stats.update++;
+                    stats.delete += _ids.length-1;
+
+                    return _ids.map((_id, i) => (i === 0 ? {
                         updateOne: {
                             filter: {_id},
                             update: {$set: {data: entry, updated: this.currentDateTime}}
                         }
-                    }
+                    } : {
+                        updateOne: {
+                            filter: {_id},
+                            update: {$set: {endDate: this.currentDateTime}}
+                        }
+                    }))
                 }
                 
                 return;
             }else{
+                stats.insert++;
                 return {
                     insertOne: {
                         document: {
@@ -95,20 +144,26 @@ class DataIngestion {
                     }
                 }
             }
-        }).filter(noop => !!noop).concat([...this.existingHashesMutatable.values()].map(_id => {
-            return {
+        }).filter(noop => !!noop).concat([...this.existingHashesMutatable.values()].flatMap(_ids => {
+            stats.delete++;
+            return _ids.map(_id => ({
                 updateOne: {
                     filter: {_id},
                     update: {$set: {endDate: this.currentDateTime}}
                 }
-            }
+            }))
         }))
-
+        
+        if(dryRun){
+            console.log(`There are ${ops.length} ops to send - ${JSON.stringify(stats)}`);
+            return;
+        }
+        
         if(ops.length > 0){
             const session = this.client.startSession();
             session.startTransaction();
             try{
-                console.log(`There are ${ops.length} ops to send`);
+                console.log(`There are ${ops.length} ops to send - ${JSON.stringify(stats)}`);
                 await this.collection.bulkWrite(ops);
                 await session.commitTransaction();
                 console.log(`All ops sent ${ops.length}`);
@@ -132,7 +187,7 @@ class DataIngestion {
     hashEntry(entry){
         const pick = _.get(this.config, 'hashing.pick');
         const omit = _.get(this.config, 'hashing.omit');
-        const hashObject = entry;
+        let hashObject = entry;
         if(pick){
             hashObject = _.pick(hashObject, pick);
         }else if(omit){
