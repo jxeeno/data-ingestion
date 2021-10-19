@@ -111,24 +111,25 @@ class DataIngestion {
             if(this.existingHashesMutatable.has(hash)){
                 // data is unmodified
                 const _ids = this.existingHashesMutatable.get(hash);
-                this.existingHashesMutatable.delete(hash);
+                const _id = _ids.pop(); // remove the last id
+
+                if(_ids.length === 0){
+                    // delete if no more items
+                    this.existingHashesMutatable.delete(hash);
+                }
+
+                // if hash is calculated, perform update
                 if(_.get(this.config, 'hashing.pick') || _.get(this.config, 'hashing.omit')){
                     stats.update++;
-                    stats.delete += _ids.length-1;
-
-                    return _ids.map((_id, i) => (i === 0 ? {
+                    return {
                         updateOne: {
                             filter: {_id},
                             update: {$set: {data: entry, updated: this.currentDateTime}}
                         }
-                    } : {
-                        updateOne: {
-                            filter: {_id},
-                            update: {$set: {endDate: this.currentDateTime}}
-                        }
-                    }))
+                    };
                 }
-                
+
+                // otherwise, ignore
                 return;
             }else{
                 stats.insert++;
